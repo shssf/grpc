@@ -58,6 +58,7 @@
 #include "src/core/lib/iomgr/iomgr_internal.h"
 #include "src/core/lib/iomgr/wakeup_fd_posix.h"
 #include "src/core/lib/iomgr/workqueue.h"
+#include "src/core/lib/iomgr/ucx_transport.h"
 #include "src/core/lib/profiling/timers.h"
 #include "src/core/lib/support/block_annotate.h"
 
@@ -398,6 +399,8 @@ static void polling_island_add_wakeup_fd_locked(polling_island *pi,
 
   ev.events = (uint32_t)(EPOLLIN | EPOLLET);
   ev.data.ptr = wakeup_fd;
+  GRPC_POLLING_TRACE("polling_island_add_wakeup_fd_locked add fd=%d to epoll_fd=%d",
+                     GRPC_WAKEUP_FD_GET_READ_FD(wakeup_fd), pi->epoll_fd);
   err = epoll_ctl(pi->epoll_fd, EPOLL_CTL_ADD,
                   GRPC_WAKEUP_FD_GET_READ_FD(wakeup_fd), &ev);
   if (err < 0 && errno != EEXIST) {
@@ -422,6 +425,7 @@ static void polling_island_remove_all_fds_locked(polling_island *pi,
   const char *err_desc = "polling_island_remove_fds";
 
   for (i = 0; i < pi->fd_cnt; i++) {
+      GRPC_POLLING_TRACE("polling_island_remove_all_fds_locked del fd=%d from epoll_fd=%d", pi->fds[i]->fd, pi->epoll_fd);
     err = epoll_ctl(pi->epoll_fd, EPOLL_CTL_DEL, pi->fds[i]->fd, NULL);
     if (err < 0 && errno != ENOENT) {
       gpr_asprintf(&err_msg,
@@ -452,6 +456,8 @@ static void polling_island_remove_fd_locked(polling_island *pi, grpc_fd *fd,
   /* If fd is already closed, then it would have been automatically been removed
      from the epoll set */
   if (!is_fd_closed) {
+      GRPC_POLLING_TRACE("polling_island_remove_fd_locked del fd=%d from epoll_fd=%d",
+              fd->fd, pi->epoll_fd);
     err = epoll_ctl(pi->epoll_fd, EPOLL_CTL_DEL, fd->fd, NULL);
     if (err < 0 && errno != ENOENT) {
       gpr_asprintf(
@@ -829,6 +835,7 @@ static void fd_global_shutdown(void) {
 
 static grpc_fd *fd_create(int fd, const char *name) {
   grpc_fd *new_fd = NULL;
+  GRPC_POLLING_TRACE("fd_create fd=%d name=%s", fd, name);
 
   gpr_mu_lock(&fd_freelist_mu);
   if (fd_freelist != NULL) {
@@ -1345,6 +1352,10 @@ static void pollset_work_and_unlock(grpc_exec_ctx *exec_ctx,
     pollset->polling_island = pi;
   }
 
+  if (GRPC_USE_UCX) {
+      ucx_prepare_fd();
+  }
+
   /* Add an extra ref so that the island does not get destroyed (which means
      the epoll_fd won't be closed) while we are are doing an epoll_wait() on the
      epoll_fd */
@@ -1352,23 +1363,33 @@ static void pollset_work_and_unlock(grpc_exec_ctx *exec_ctx,
   gpr_mu_unlock(&pollset->mu);
 
   do {
-    ep_rv = epoll_pwait(epoll_fd, ep_ev, GRPC_EPOLL_MAX_EVENTS, timeout_ms,
-                        sig_mask);
-    if (ep_rv < 0) {
-      if (errno != EINTR) {
-        gpr_asprintf(&err_msg,
-                     "epoll_wait() epoll fd: %d failed with error: %d (%s)",
-                     epoll_fd, errno, strerror(errno));
-        append_error(error, GRPC_OS_ERROR(errno, err_msg), err_desc);
+      ep_rv = 0;
+      GRPC_POLLING_TRACE("epoll_pwait pool_fd=%d enter timeout=%d", epoll_fd, timeout_ms);
+
+      ep_rv = epoll_pwait(epoll_fd, ep_ev, GRPC_EPOLL_MAX_EVENTS, timeout_ms, sig_mask);
+
+      if (ep_rv > 0) {
+          grpc_fd *fd_tmp = ep_ev->data.ptr;
+          GRPC_POLLING_TRACE("epoll_pwait pool_fd=%d exit ret=%d wake_fd=%d data_ptr=%p",
+                             epoll_fd, ep_rv, fd_tmp->fd, ep_ev->data.ptr);
       } else {
-        /* We were interrupted. Save an interation by doing a zero timeout
-           epoll_wait to see if there are any other events of interest */
-        GRPC_POLLING_TRACE(
-            "pollset_work: pollset: %p, worker: %p received kick",
-            (void *)pollset, (void *)worker);
-        ep_rv = epoll_wait(epoll_fd, ep_ev, GRPC_EPOLL_MAX_EVENTS, 0);
+          GRPC_POLLING_TRACE("epoll_pwait pool_fd=%d exit ret=%d",
+                             epoll_fd, ep_rv);
       }
-    }
+      if (ep_rv < 0) {
+        if (errno != EINTR) {
+          gpr_asprintf(&err_msg,
+                  "epoll_wait() epoll fd: %d failed with error: %d (%s)",
+                  epoll_fd, errno, strerror(errno));
+          append_error(error, GRPC_OS_ERROR(errno, err_msg), err_desc);
+        } else {
+          /* We were interrupted. Save an interation by doing a zero timeout
+                 epoll_wait to see if there are any other events of interest */
+          GRPC_POLLING_TRACE("pollset_work: pollset: %p, worker: %p received kick",
+                  (void *)pollset, (void *)worker);
+          ep_rv = epoll_wait(epoll_fd, ep_ev, GRPC_EPOLL_MAX_EVENTS, 0);
+        }
+      }
 
 #ifdef GRPC_TSAN
     /* See the definition of g_poll_sync for more details */
@@ -1377,6 +1398,7 @@ static void pollset_work_and_unlock(grpc_exec_ctx *exec_ctx,
 
     for (int i = 0; i < ep_rv; ++i) {
       void *data_ptr = ep_ev[i].data.ptr;
+      GRPC_POLLING_TRACE("epoll_pwait handle fd=%d data_ptr=%p", ((grpc_fd *)data_ptr)->fd, data_ptr);
       if (data_ptr == &grpc_global_wakeup_fd) {
         append_error(error,
                      grpc_wakeup_fd_consume_wakeup(&grpc_global_wakeup_fd),
@@ -1392,6 +1414,7 @@ static void pollset_work_and_unlock(grpc_exec_ctx *exec_ctx,
            epoll_fd */
       } else {
         grpc_fd *fd = data_ptr;
+        GRPC_POLLING_TRACE("epoll_pwait handler data_ptr=%p wake_fd=%d events=%u", data_ptr, fd->fd, ep_ev[i].events);
         int cancel = ep_ev[i].events & (EPOLLERR | EPOLLHUP);
         int read_ev = ep_ev[i].events & (EPOLLIN | EPOLLPRI);
         int write_ev = ep_ev[i].events & EPOLLOUT;

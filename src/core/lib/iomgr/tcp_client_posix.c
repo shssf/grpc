@@ -54,6 +54,7 @@
 #include "src/core/lib/iomgr/tcp_posix.h"
 #include "src/core/lib/iomgr/timer.h"
 #include "src/core/lib/iomgr/unix_sockets_posix.h"
+#include "src/core/lib/iomgr/ucx_transport.h"
 #include "src/core/lib/support/string.h"
 
 extern int grpc_tcp_trace;
@@ -190,7 +191,11 @@ static void on_writable(grpc_exec_ctx *exec_ctx, void *acp, grpc_error *error) {
       }
     } else {
       grpc_pollset_set_del_fd(exec_ctx, ac->interested_parties, fd);
-      *ep = grpc_tcp_create(fd, GRPC_TCP_DEFAULT_READ_SLICE_SIZE, ac->addr_str);
+      if (GRPC_USE_UCX) { /*  UCX TODO */
+          *ep = grpc_ucx_create(fd, GRPC_TCP_DEFAULT_READ_SLICE_SIZE, ac->addr_str);
+      } else {
+          *ep = grpc_tcp_create(fd, GRPC_TCP_DEFAULT_READ_SLICE_SIZE, ac->addr_str);
+      }
       fd = NULL;
       goto finish;
     }
@@ -232,6 +237,7 @@ static void tcp_client_connect_impl(grpc_exec_ctx *exec_ctx,
   int fd;
   grpc_dualstack_mode dsmode;
   int err;
+  int connect_errno;
   async_connect *ac;
   struct sockaddr_in6 addr6_v4mapped;
   struct sockaddr_in addr4_copy;
@@ -268,21 +274,40 @@ static void tcp_client_connect_impl(grpc_exec_ctx *exec_ctx,
     GPR_ASSERT(addr_len < ~(socklen_t)0);
     err = connect(fd, addr, (socklen_t)addr_len);
   } while (err < 0 && errno == EINTR);
-
+  connect_errno = errno;
+  gpr_log(GPR_DEBUG, "UCX_CLIENT_CONNECT fd=%d, ret=%d, errno(%d)=%m", fd, err, errno);
   addr_str = grpc_sockaddr_to_uri(addr);
-  gpr_asprintf(&name, "tcp-client:%s", addr_str);
 
-  fdobj = grpc_fd_create(fd, name);
+  if (GRPC_USE_UCX) {
+      int save_errno = errno;
+      ucx_connect(fd, 0);
+      errno = save_errno;
+
+      gpr_asprintf(&name, "ucx-client:%s", addr_str);
+      int ucx_fd = ucx_get_fd();
+      GPR_ASSERT(0 != ucx_fd);
+
+      fdobj = grpc_fd_create(ucx_fd, name);
+      err = 0; /* while ucx_init procedure connection established on tcp socket */
+      /* TODO Do we need previously created tcp socket any more? */
+  } else {
+      gpr_asprintf(&name, "tcp-client:%s", addr_str);
+      fdobj = grpc_fd_create(fd, name);
+  }
 
   if (err >= 0) {
-    *ep = grpc_tcp_create(fdobj, GRPC_TCP_DEFAULT_READ_SLICE_SIZE, addr_str);
+      if (GRPC_USE_UCX) {
+          *ep = grpc_ucx_create(fdobj, GRPC_TCP_DEFAULT_READ_SLICE_SIZE, addr_str);
+      } else {
+          *ep = grpc_tcp_create(fdobj, GRPC_TCP_DEFAULT_READ_SLICE_SIZE, addr_str);
+      }
     grpc_exec_ctx_sched(exec_ctx, closure, GRPC_ERROR_NONE, NULL);
     goto done;
   }
 
-  if (errno != EWOULDBLOCK && errno != EINPROGRESS) {
+  if (connect_errno != EWOULDBLOCK && connect_errno != EINPROGRESS) {
     grpc_fd_orphan(exec_ctx, fdobj, NULL, NULL, "tcp_client_connect_error");
-    grpc_exec_ctx_sched(exec_ctx, closure, GRPC_OS_ERROR(errno, "connect"),
+    grpc_exec_ctx_sched(exec_ctx, closure, GRPC_OS_ERROR(connect_errno, "connect"),
                         NULL);
     goto done;
   }
