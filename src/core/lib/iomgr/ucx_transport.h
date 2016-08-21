@@ -11,6 +11,7 @@
 #include "src/core/lib/iomgr/ev_posix.h"
 
 #define GRPC_USE_UCX 1
+extern int grpc_ucx_trace;
 
 /**
  * Get internal UCX transport file descriptor to wake-up on receive

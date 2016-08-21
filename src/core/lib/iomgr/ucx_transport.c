@@ -36,15 +36,12 @@ typedef struct ucx_request_t {
     int completed;
 } ucx_request;
 
-static int            grpc_ucx_trace      = 0;
+int                   grpc_ucx_trace      = 0;    /* debug trace print control */
+static ucp_context_h  ucx_context         = NULL; /* UCX library common context */
+
 static int            ucx_fd_local        = 0;
 static ucp_ep_h       ucx_ep              = NULL;
-static ucp_context_h  ucx_cont            = NULL;
 static ucp_worker_h   ucx_worker          = NULL;
-static size_t         ucx_worker_addr_len = 0;
-static ucp_address_t *ucx_worker_addr     = NULL;
-static size_t         ucx_peer_addr_len   = 0;
-static ucp_address_t *ucx_peer_addr       = NULL;
 
 static void send_handle(void *request, ucs_status_t status)
 {
@@ -152,6 +149,20 @@ static void ucx_internal_read(grpc_exec_ctx *exec_ctx, grpc_ucx *ucx)
         return;
     }
 
+    if (0 == info_tag.length) { /* 0 read size ==> end of stream */
+        if (grpc_ucx_trace) {
+            gpr_log(GPR_DEBUG, "UCX ucx_internal_read -> end of stream -> grpc_exec_ctx_sched");
+        }
+        gpr_slice_buffer_reset_and_unref(ucx->incoming_buffer);
+        grpc_closure *cb = ucx->read_cb;
+        ucx->read_cb = NULL;
+        ucx->incoming_buffer = NULL;
+        grpc_error *err = GRPC_ERROR_CREATE("EOF");
+        grpc_exec_ctx_sched(exec_ctx, cb, err, NULL);
+        //TCP_UNREF(exec_ctx, tcp, "read");
+        return;
+    }
+
     /* Receive slice by slice */
     size_t recv_slices_num = 0, ucx_bytes_read = 0;
     ucx_bytes_read = ucx_recv_msg(&recv_slices_num, sizeof(recv_slices_num));
@@ -168,11 +179,13 @@ static void ucx_internal_read(grpc_exec_ctx *exec_ctx, grpc_ucx *ucx)
     }
     ucx->incoming_buffer->length = ucx_bytes_read;
 
-    if (1 < grpc_ucx_trace) {
-        for (size_t i = 0; i < ucx->incoming_buffer->count; i++) {
-            char *data = gpr_dump_slice(ucx->incoming_buffer->slices[i], GPR_DUMP_HEX | GPR_DUMP_ASCII);
-            gpr_log(GPR_DEBUG, "UCX READ(%lu) slice_len=%lu %s", ucx_bytes_read, GPR_SLICE_LENGTH(ucx->incoming_buffer->slices[i]), data);
-            gpr_free(data);
+    if (grpc_ucx_trace) {
+        if (1 < grpc_ucx_trace) {
+            for (size_t i = 0; i < ucx->incoming_buffer->count; i++) {
+                char *data = gpr_dump_slice(ucx->incoming_buffer->slices[i], GPR_DUMP_HEX | GPR_DUMP_ASCII);
+                gpr_log(GPR_DEBUG, "UCX READ(%lu) slice_len=%lu %s", ucx_bytes_read, GPR_SLICE_LENGTH(ucx->incoming_buffer->slices[i]), data);
+                gpr_free(data);
+            }
         }
         gpr_log(GPR_DEBUG, "UCX ucx_ib_read len=%lu", ucx_bytes_read);
     }
@@ -305,6 +318,9 @@ static void ucx_destroy(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep)
     grpc_network_status_unregister_endpoint(ep);
     gpr_free(ucx->peer_string);
     gpr_free(ucx);
+
+    //TODO hangs ucp_worker_destroy(ucx_worker);
+    ucp_cleanup(ucx_context);
 }
 
 static char *ucx_get_peer(grpc_endpoint *ep)
@@ -373,7 +389,7 @@ static void ucx_init()
         gpr_log(GPR_DEBUG, "UCX ucx_init");
     }
 
-    if (NULL != ucx_cont) {
+    if (NULL != ucx_context) {
         return;
     }
     GPR_ASSERT(NULL == ucx_worker);
@@ -390,7 +406,7 @@ static void ucx_init()
     ucp_params.request_init    = request_init;
     ucp_params.request_cleanup = NULL;
 
-    status = ucp_init(&ucp_params, config, &ucx_cont);
+    status = ucp_init(&ucp_params, config, &ucx_context);
 
     //ucp_config_print(config, stdout, "ucp_config_print", UCS_CONFIG_PRINT_CONFIG);
 
@@ -398,23 +414,6 @@ static void ucx_init()
     if (status != UCS_OK) {
         gpr_log(GPR_DEBUG, "UCX ucp_init failed");
         return;
-    }
-
-    status = ucp_worker_create(ucx_cont, UCS_THREAD_MODE_SINGLE, &ucx_worker);
-    if (status != UCS_OK) {
-        gpr_log(GPR_DEBUG, "UCX ucp_worker_create failed");
-        return;
-    }
-
-    //a BUG? ucp_worker_proto_print(ucx_worker, stdout, "ucp_worker_proto_print", UCS_CONFIG_PRINT_CONFIG);
-
-    status = ucp_worker_get_address(ucx_worker, &ucx_worker_addr, &ucx_worker_addr_len);
-    if (status != UCS_OK) {
-        gpr_log(GPR_DEBUG, "UCX ucp_worker_get_address failed");
-        return;
-    }
-    if (grpc_ucx_trace) {
-        gpr_log(GPR_DEBUG, "UCX initialized with addr_len=%lu", ucx_worker_addr_len);
     }
 }
 
@@ -447,42 +446,65 @@ static void wait_fd(int epoll_fd)
     close(epoll_fd_local);
 }
 
-#define UCX_SOCK_SEND( _data_, _size_, _msg_)                     \
+#define UCX_SOCK_SEND( _fd_, _data_, _size_, _msg_)               \
     do {                                                          \
         errno = 0;                                                \
-        ssize_t ret = send(fd, _data_, _size_, 0);                \
+        ssize_t ret = send(_fd_, _data_, _size_, 0);              \
         if (ret < 0 || ret != (int) _size_) {                     \
             gpr_log(GPR_DEBUG, "UCX failed to send " _msg_ " errno=%m"); \
             return;                                               \
         }                                                         \
     } while(0)
 
-#define UCX_SOCK_RECV( _data_, _size_, _msg_)                     \
+#define UCX_SOCK_RECV( _fd_, _data_, _size_, _msg_)               \
     do {                                                          \
         errno = 0;                                                \
-        wait_fd(fd);                                              \
-        ssize_t ret = recv(fd, _data_, _size_, 0);                \
+        wait_fd(_fd_);                                            \
+        ssize_t ret = recv(_fd_, _data_, _size_, 0);              \
         if (ret < 0 || ret != (int) _size_) {                     \
             gpr_log(GPR_DEBUG, "UCX failed to recv " _msg_ " errno=%m ret=%ld expected size=%ld", ret, _size_); \
             return;                                               \
         }                                                         \
     } while(0)
 
-void ucx_connect(int fd, int is_server)
+void ucx_connect(int tcp_fd, int is_server)
 {
+    size_t         ucx_worker_addr_len = 0;
+    ucp_address_t *ucx_worker_addr     = NULL;
+    size_t         ucx_peer_addr_len   = 0;
+    ucp_address_t *ucx_peer_addr       = NULL;
+    ucs_status_t   status;
+
     if (grpc_ucx_trace) {
-        gpr_log(GPR_DEBUG, "UCX connect fd=%d incoming errno(%d)=%m", fd, errno);
+        gpr_log(GPR_DEBUG, "UCX connect fd=%d incoming errno(%d)=%m", tcp_fd, errno);
     }
-    if (fd < 0 || (NULL != ucx_ep) || !GRPC_USE_UCX) {
+    if (tcp_fd < 0 || (NULL != ucx_ep) || !GRPC_USE_UCX) {
         return;
     }
 
-    if (!ucx_cont) {
+    if (!ucx_context) {
         ucx_init();
     }
 
+    status = ucp_worker_create(ucx_context, UCS_THREAD_MODE_SINGLE, &ucx_worker);
+    if (status != UCS_OK) {
+        gpr_log(GPR_DEBUG, "UCX ucp_worker_create failed");
+        return;
+    }
+
+    //a BUG? ucp_worker_proto_print(ucx_worker, stdout, "ucp_worker_proto_print", UCS_CONFIG_PRINT_CONFIG);
+
+    status = ucp_worker_get_address(ucx_worker, &ucx_worker_addr, &ucx_worker_addr_len);
+    if (status != UCS_OK) {
+        gpr_log(GPR_DEBUG, "UCX ucp_worker_get_address failed");
+        return;
+    }
+    if (grpc_ucx_trace) {
+        gpr_log(GPR_DEBUG, "UCX initialized with addr_len=%lu", ucx_worker_addr_len);
+    }
+
     if (is_server) {
-        UCX_SOCK_RECV(&ucx_peer_addr_len, sizeof(ucx_peer_addr_len), "address length");
+        UCX_SOCK_RECV(tcp_fd, &ucx_peer_addr_len, sizeof(ucx_peer_addr_len), "address length");
         if (grpc_ucx_trace) {
             gpr_log(GPR_DEBUG, "UCX received address len=%lu", ucx_peer_addr_len);
         }
@@ -493,15 +515,15 @@ void ucx_connect(int fd, int is_server)
             return;
         }
 
-        UCX_SOCK_RECV(ucx_peer_addr, ucx_peer_addr_len, "address");
+        UCX_SOCK_RECV(tcp_fd, ucx_peer_addr, ucx_peer_addr_len, "address");
 
-        UCX_SOCK_SEND(&ucx_worker_addr_len, sizeof(ucx_worker_addr_len), "address length");
-        UCX_SOCK_SEND(ucx_worker_addr, ucx_worker_addr_len, "address");
+        UCX_SOCK_SEND(tcp_fd, &ucx_worker_addr_len, sizeof(ucx_worker_addr_len), "address length");
+        UCX_SOCK_SEND(tcp_fd, ucx_worker_addr, ucx_worker_addr_len, "address");
     } else {
-        UCX_SOCK_SEND(&ucx_worker_addr_len, sizeof(ucx_worker_addr_len), "address length");
-        UCX_SOCK_SEND(ucx_worker_addr, ucx_worker_addr_len, "address");
+        UCX_SOCK_SEND(tcp_fd, &ucx_worker_addr_len, sizeof(ucx_worker_addr_len), "address length");
+        UCX_SOCK_SEND(tcp_fd, ucx_worker_addr, ucx_worker_addr_len, "address");
 
-        UCX_SOCK_RECV(&ucx_peer_addr_len, sizeof(ucx_peer_addr_len), "address length");
+        UCX_SOCK_RECV(tcp_fd, &ucx_peer_addr_len, sizeof(ucx_peer_addr_len), "address length");
         if (grpc_ucx_trace) {
             gpr_log(GPR_DEBUG, "UCX received address len=%lu", ucx_peer_addr_len);
         }
@@ -512,21 +534,26 @@ void ucx_connect(int fd, int is_server)
             return;
         }
 
-        UCX_SOCK_RECV(ucx_peer_addr, ucx_peer_addr_len, "address");
+        UCX_SOCK_RECV(tcp_fd, ucx_peer_addr, ucx_peer_addr_len, "address");
     }
 
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_connect addr=%p, addr_len=%lu, worker=%p, ep=%p", ucx_peer_addr, ucx_peer_addr_len, ucx_worker, ucx_ep);
     }
-    ucs_status_t status = ucp_ep_create(ucx_worker, ucx_peer_addr, &ucx_ep);
+    status = ucp_ep_create(ucx_worker, ucx_peer_addr, &ucx_ep);
     if (status != UCS_OK) {
         gpr_log(GPR_DEBUG, "UCX ucp_ep_create failed with error: %s", ucs_status_string(status));
         return;
     }
+
     ucx_fd_local = ucx_fd();
+
     if (grpc_ucx_trace) {
-        gpr_log(GPR_DEBUG, "UCX EP created FD=%d outgoing errno(%d)=%m", ucx_fd_local, errno);
+        gpr_log(GPR_DEBUG, "UCX EP created FD=%d", ucx_fd_local);
     }
+
+    free(ucx_peer_addr);
+    ucp_worker_release_address(ucx_worker, ucx_worker_addr);
 }
 
 int ucx_get_fd()
