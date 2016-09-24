@@ -39,6 +39,7 @@
 #include <grpc++/impl/codegen/config.h>
 #include <grpc++/impl/codegen/core_codegen_interface.h>
 #include <grpc++/impl/codegen/status.h>
+#include "../src/core/lib/iomgr/ucx_timers.h"
 
 namespace grpc {
 
@@ -52,6 +53,7 @@ template <class InputMessage, class OutputMessage>
 Status BlockingUnaryCall(ChannelInterface* channel, const RpcMethod& method,
                          ClientContext* context, const InputMessage& request,
                          OutputMessage* result) {
+
   CompletionQueue cq;
   Call call(channel->CreateCall(method, context, &cq));
   CallOpSet<CallOpSendInitialMetadata, CallOpSendMessage,
@@ -69,7 +71,13 @@ Status BlockingUnaryCall(ChannelInterface* channel, const RpcMethod& method,
   ops.ClientSendClose();
   ops.ClientRecvStatus(context, &status);
   call.PerformOps(&ops);
+
+  // END of PROTOBUF work
+  gpr_log(GPR_DEBUG, "UCXTL_PROTOBUF_PASSED END %lu\n", ucx_timer[UCXTL_PROTOBUF_PASSED]);
+ucx_timer[UCXTL_PROTOBUF_PASSED] = timer_nano() - ucx_timer[UCXTL_PROTOBUF_PASSED];
+//UCX_TIMER_START(UCXTL_PROTOBUF_PASSED);
   GPR_CODEGEN_ASSERT((cq.Pluck(&ops) && ops.got_message) || !status.ok());
+//UCX_TIMER_END(UCXTL_PROTOBUF_PASSED);
   return status;
 }
 

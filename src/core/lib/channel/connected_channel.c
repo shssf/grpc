@@ -44,6 +44,7 @@
 #include "src/core/lib/profiling/timers.h"
 #include "src/core/lib/support/string.h"
 #include "src/core/lib/transport/transport.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 
 #define MAX_BUFFER_LENGTH 8192
 
@@ -87,9 +88,11 @@ static void init_call_elem(grpc_exec_ctx *exec_ctx, grpc_call_element *elem,
   channel_data *chand = elem->channel_data;
   int r;
 
+  assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//server side UCX_TIMER_START(UCXTL_CHTTP2);
   r = grpc_transport_init_stream(
       exec_ctx, chand->transport, TRANSPORT_STREAM_FROM_CALL_DATA(calld),
       &args->call_stack->refcount, args->server_transport_data);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
   GPR_ASSERT(r == 0);
 }
 

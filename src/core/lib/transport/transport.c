@@ -38,6 +38,7 @@
 #include <grpc/support/sync.h>
 #include "src/core/lib/support/string.h"
 #include "src/core/lib/transport/transport_impl.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 
 #ifdef GRPC_STREAM_REFCOUNT_DEBUG
 void grpc_stream_ref(grpc_stream_refcount *refcount, const char *reason) {
@@ -102,34 +103,63 @@ size_t grpc_transport_stream_size(grpc_transport *transport) {
 
 void grpc_transport_destroy(grpc_exec_ctx *exec_ctx,
                             grpc_transport *transport) {
+    UCX_TIMER_START(UCXTL_CHTTP2);
   transport->vtable->destroy(exec_ctx, transport);
+  UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 int grpc_transport_init_stream(grpc_exec_ctx *exec_ctx,
                                grpc_transport *transport, grpc_stream *stream,
                                grpc_stream_refcount *refcount,
                                const void *server_data) {
-  return transport->vtable->init_stream(exec_ctx, transport, stream, refcount,
+    uint64_t ucx_timerUCXTL_CHTTP2 = 0;
+    int start_prof = 0;
+    if (0 == ucx_timer_mtx[UCXTL_CHTTP2]) {//server side
+        ucx_timerUCXTL_CHTTP2 = timer_nano();
+        ucx_timer_mtx[UCXTL_CHTTP2] = 1;
+        start_prof = 1;
+    }
+    int tmp = transport->vtable->init_stream(exec_ctx, transport, stream, refcount,
                                         server_data);
+    if (start_prof) {
+        UCX_TIMER_END(UCXTL_CHTTP2);
+    }
+  return tmp;
 }
 
 void grpc_transport_perform_stream_op(grpc_exec_ctx *exec_ctx,
                                       grpc_transport *transport,
                                       grpc_stream *stream,
                                       grpc_transport_stream_op *op) {
-  transport->vtable->perform_stream_op(exec_ctx, transport, stream, op);
+
+    //assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//server side  UCX_TIMER_START(UCXTL_CHTTP2);
+    uint64_t ucx_timerUCXTL_CHTTP2 = 0;
+    int start_prof = 0;
+    if (0 == ucx_timer_mtx[UCXTL_CHTTP2]) {//server side
+        ucx_timerUCXTL_CHTTP2 = timer_nano();
+        ucx_timer_mtx[UCXTL_CHTTP2] = 1;
+        start_prof = 1;
+    }
+    transport->vtable->perform_stream_op(exec_ctx, transport, stream, op);
+    if (start_prof) {
+        UCX_TIMER_END(UCXTL_CHTTP2);
+    }
+    //UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 void grpc_transport_perform_op(grpc_exec_ctx *exec_ctx,
                                grpc_transport *transport,
                                grpc_transport_op *op) {
-  transport->vtable->perform_op(exec_ctx, transport, op);
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    transport->vtable->perform_op(exec_ctx, transport, op);
+    UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 void grpc_transport_set_pops(grpc_exec_ctx *exec_ctx, grpc_transport *transport,
                              grpc_stream *stream,
                              grpc_polling_entity *pollent) {
-  grpc_pollset *pollset;
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_pollset *pollset;
   grpc_pollset_set *pollset_set;
   if ((pollset = grpc_polling_entity_pollset(pollent)) != NULL) {
     transport->vtable->set_pollset(exec_ctx, transport, stream, pollset);
@@ -139,18 +169,24 @@ void grpc_transport_set_pops(grpc_exec_ctx *exec_ctx, grpc_transport *transport,
   } else {
     abort();
   }
+  UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 void grpc_transport_destroy_stream(grpc_exec_ctx *exec_ctx,
                                    grpc_transport *transport,
                                    grpc_stream *stream, void *and_free_memory) {
-  transport->vtable->destroy_stream(exec_ctx, transport, stream,
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    transport->vtable->destroy_stream(exec_ctx, transport, stream,
                                     and_free_memory);
+    UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 char *grpc_transport_get_peer(grpc_exec_ctx *exec_ctx,
                               grpc_transport *transport) {
-  return transport->vtable->get_peer(exec_ctx, transport);
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    char *tmp =  transport->vtable->get_peer(exec_ctx, transport);
+    UCX_TIMER_END(UCXTL_CHTTP2);
+    return tmp;
 }
 
 void grpc_transport_stream_op_finish_with_failure(grpc_exec_ctx *exec_ctx,

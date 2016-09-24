@@ -57,6 +57,7 @@
 #include "src/core/lib/iomgr/ev_posix.h"
 #include "src/core/lib/profiling/timers.h"
 #include "src/core/lib/support/string.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 
 #ifdef GPR_HAVE_MSG_NOSIGNAL
 #define SENDMSG_FLAGS MSG_NOSIGNAL
@@ -210,10 +211,12 @@ static void tcp_continue_read(grpc_exec_ctx *exec_ctx, grpc_tcp *tcp) {
   msg.msg_flags = 0;
 
   GPR_TIMER_BEGIN("recvmsg", 1);
+  UCX_TIMER_START(UCXTL_UCX);
   do {
     read_bytes = recvmsg(tcp->fd, &msg, 0);
   } while (read_bytes < 0 && errno == EINTR);
   GPR_TIMER_END("recvmsg", 0);
+  UCX_TIMER_END(UCXTL_UCX);
 
   if (read_bytes < 0) {
     /* NB: After calling call_read_cb a parallel call of the read handler may
@@ -254,7 +257,8 @@ static void tcp_continue_read(grpc_exec_ctx *exec_ctx, grpc_tcp *tcp) {
 
 static void tcp_handle_read(grpc_exec_ctx *exec_ctx, void *arg /* grpc_tcp */,
                             grpc_error *error) {
-  grpc_tcp *tcp = (grpc_tcp *)arg;
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)arg;
   GPR_ASSERT(!tcp->finished_edge);
 
   if (error != GRPC_ERROR_NONE) {
@@ -264,11 +268,13 @@ static void tcp_handle_read(grpc_exec_ctx *exec_ctx, void *arg /* grpc_tcp */,
   } else {
     tcp_continue_read(exec_ctx, tcp);
   }
+  UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void tcp_read(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
                      gpr_slice_buffer *incoming_buffer, grpc_closure *cb) {
   grpc_tcp *tcp = (grpc_tcp *)ep;
+  UCX_TIMER_START(UCXTL_ENDPOINT);
   GPR_ASSERT(tcp->read_cb == NULL);
   tcp->read_cb = cb;
   tcp->incoming_buffer = incoming_buffer;
@@ -281,6 +287,7 @@ static void tcp_read(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
   } else {
     grpc_exec_ctx_sched(exec_ctx, &tcp->read_closure, GRPC_ERROR_NONE, NULL);
   }
+  UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 /* returns true if done, false if pending; if returning true, *error is set */
@@ -325,11 +332,13 @@ static bool tcp_flush(grpc_tcp *tcp, grpc_error **error) {
     msg.msg_flags = 0;
 
     GPR_TIMER_BEGIN("sendmsg", 1);
+    UCX_TIMER_START(UCXTL_UCX);
     do {
       /* TODO(klempner): Cork if this is a partial write */
       sent_length = sendmsg(tcp->fd, &msg, SENDMSG_FLAGS);
     } while (sent_length < 0 && errno == EINTR);
     GPR_TIMER_END("sendmsg", 0);
+    UCX_TIMER_END(UCXTL_UCX);
 
     if (sent_length < 0) {
       if (errno == EAGAIN) {
@@ -367,7 +376,8 @@ static bool tcp_flush(grpc_tcp *tcp, grpc_error **error) {
 
 static void tcp_handle_write(grpc_exec_ctx *exec_ctx, void *arg /* grpc_tcp */,
                              grpc_error *error) {
-  grpc_tcp *tcp = (grpc_tcp *)arg;
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)arg;
   grpc_closure *cb;
 
   if (error != GRPC_ERROR_NONE) {
@@ -389,11 +399,13 @@ static void tcp_handle_write(grpc_exec_ctx *exec_ctx, void *arg /* grpc_tcp */,
     TCP_UNREF(exec_ctx, tcp, "write");
     GRPC_ERROR_UNREF(error);
   }
+  UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void tcp_write(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
                       gpr_slice_buffer *buf, grpc_closure *cb) {
-  grpc_tcp *tcp = (grpc_tcp *)ep;
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)ep;
   grpc_error *error = GRPC_ERROR_NONE;
 
   if (grpc_tcp_trace) {
@@ -429,30 +441,40 @@ static void tcp_write(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
   } else {
     grpc_exec_ctx_sched(exec_ctx, cb, error, NULL);
   }
-
+  UCX_TIMER_END(UCXTL_ENDPOINT);
   GPR_TIMER_END("tcp_write", 0);
 }
 
 static void tcp_add_to_pollset(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
                                grpc_pollset *pollset) {
-  grpc_tcp *tcp = (grpc_tcp *)ep;
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)ep;
   grpc_pollset_add_fd(exec_ctx, pollset, tcp->em_fd);
+  UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void tcp_add_to_pollset_set(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
                                    grpc_pollset_set *pollset_set) {
-  grpc_tcp *tcp = (grpc_tcp *)ep;
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)ep;
   grpc_pollset_set_add_fd(exec_ctx, pollset_set, tcp->em_fd);
+  UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static char *tcp_get_peer(grpc_endpoint *ep) {
-  grpc_tcp *tcp = (grpc_tcp *)ep;
-  return gpr_strdup(tcp->peer_string);
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)ep;
+  char *tmp = gpr_strdup(tcp->peer_string);
+  UCX_TIMER_END(UCXTL_ENDPOINT);
+  return tmp;
 }
 
 static grpc_workqueue *tcp_get_workqueue(grpc_endpoint *ep) {
-  grpc_tcp *tcp = (grpc_tcp *)ep;
-  return grpc_fd_get_workqueue(tcp->em_fd);
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)ep;
+  grpc_workqueue *tmp = grpc_fd_get_workqueue(tcp->em_fd);
+  UCX_TIMER_END(UCXTL_ENDPOINT);
+  return tmp;
 }
 
 static const grpc_endpoint_vtable vtable = {tcp_read,
@@ -466,7 +488,8 @@ static const grpc_endpoint_vtable vtable = {tcp_read,
 
 grpc_endpoint *grpc_tcp_create(grpc_fd *em_fd, size_t slice_size,
                                const char *peer_string) {
-  grpc_tcp *tcp = (grpc_tcp *)gpr_malloc(sizeof(grpc_tcp));
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)gpr_malloc(sizeof(grpc_tcp));
   tcp->base.vtable = &vtable;
   tcp->peer_string = gpr_strdup(peer_string);
   tcp->fd = grpc_fd_wrapped_fd(em_fd);
@@ -488,14 +511,18 @@ grpc_endpoint *grpc_tcp_create(grpc_fd *em_fd, size_t slice_size,
   gpr_slice_buffer_init(&tcp->last_read_buffer);
   /* Tell network status tracker about new endpoint */
   grpc_network_status_register_endpoint(&tcp->base);
+  UCX_TIMER_END(UCXTL_ENDPOINT);
 
   return &tcp->base;
 }
 
 int grpc_tcp_fd(grpc_endpoint *ep) {
-  grpc_tcp *tcp = (grpc_tcp *)ep;
+    UCX_TIMER_START(UCXTL_ENDPOINT);
+    grpc_tcp *tcp = (grpc_tcp *)ep;
   GPR_ASSERT(ep->vtable == &vtable);
-  return grpc_fd_wrapped_fd(tcp->em_fd);
+  int tmp = grpc_fd_wrapped_fd(tcp->em_fd);
+  UCX_TIMER_END(UCXTL_ENDPOINT);
+  return tmp;
 }
 
 void grpc_tcp_destroy_and_release_fd(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,

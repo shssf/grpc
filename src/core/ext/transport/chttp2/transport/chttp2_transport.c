@@ -53,6 +53,7 @@
 #include "src/core/lib/support/string.h"
 #include "src/core/lib/transport/static_metadata.h"
 #include "src/core/lib/transport/transport_impl.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 
 #define DEFAULT_WINDOW 65535
 #define DEFAULT_CONNECTION_WINDOW_TARGET (1024 * 1024)
@@ -163,7 +164,7 @@ static void fail_pending_writes(grpc_exec_ctx *exec_ctx,
 static void destruct_transport(grpc_exec_ctx *exec_ctx,
                                grpc_chttp2_transport *t) {
   size_t i;
-
+  //UCX_TIMER_START(UCXTL_CHTTP2);
   gpr_mu_lock(&t->executor.mu);
 
   GPR_ASSERT(t->ep == NULL);
@@ -206,6 +207,7 @@ static void destruct_transport(grpc_exec_ctx *exec_ctx,
 
   gpr_free(t->peer_string);
   gpr_free(t);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 /*#define REFCOUNTING_DEBUG 1*/
@@ -242,7 +244,7 @@ static void init_transport(grpc_exec_ctx *exec_ctx, grpc_chttp2_transport *t,
                            grpc_endpoint *ep, bool is_client) {
   size_t i;
   int j;
-
+  UCX_TIMER_START(UCXTL_CHTTP2);
   GPR_ASSERT(strlen(GRPC_CHTTP2_CLIENT_CONNECT_STRING) ==
              GRPC_CHTTP2_CLIENT_CONNECT_STRLEN);
 
@@ -410,6 +412,7 @@ static void init_transport(grpc_exec_ctx *exec_ctx, grpc_chttp2_transport *t,
       }
     }
   }
+  UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 static void destroy_transport_locked(grpc_exec_ctx *exec_ctx,
@@ -507,7 +510,8 @@ static void finish_init_stream_locked(grpc_exec_ctx *exec_ctx,
 static int init_stream(grpc_exec_ctx *exec_ctx, grpc_transport *gt,
                        grpc_stream *gs, grpc_stream_refcount *refcount,
                        const void *server_data) {
-  grpc_chttp2_transport *t = (grpc_chttp2_transport *)gt;
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_transport *t = (grpc_chttp2_transport *)gt;
   grpc_chttp2_stream *s = (grpc_chttp2_stream *)gs;
 
   memset(s, 0, sizeof(*s));
@@ -545,7 +549,7 @@ static int init_stream(grpc_exec_ctx *exec_ctx, grpc_transport *gt,
     grpc_chttp2_stream_map_add(&t->parsing_stream_map, s->global.id, s);
     s->global.in_stream_map = true;
   }
-
+  //UCX_TIMER_END(UCXTL_CHTTP2);
   grpc_chttp2_run_with_global_lock(exec_ctx, t, s, finish_init_stream_locked,
                                    NULL, 0);
 
@@ -556,7 +560,7 @@ static void destroy_stream_locked(grpc_exec_ctx *exec_ctx,
                                   grpc_chttp2_transport *t,
                                   grpc_chttp2_stream *s, void *arg) {
   grpc_byte_stream *bs;
-
+  assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//UCX_TIMER_START(UCXTL_CHTTP2);
   GPR_TIMER_BEGIN("destroy_stream", 0);
 
   GPR_ASSERT((s->global.write_closed && s->global.read_closed) ||
@@ -612,6 +616,7 @@ static void destroy_stream_locked(grpc_exec_ctx *exec_ctx,
   GPR_TIMER_END("destroy_stream", 0);
 
   gpr_free(arg);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 static void destroy_stream(grpc_exec_ctx *exec_ctx, grpc_transport *gt,
@@ -625,15 +630,18 @@ static void destroy_stream(grpc_exec_ctx *exec_ctx, grpc_transport *gt,
 
 grpc_chttp2_stream_parsing *grpc_chttp2_parsing_lookup_stream(
     grpc_chttp2_transport_parsing *transport_parsing, uint32_t id) {
-  grpc_chttp2_transport *t = TRANSPORT_FROM_PARSING(transport_parsing);
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//server side UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_transport *t = TRANSPORT_FROM_PARSING(transport_parsing);
   grpc_chttp2_stream *s =
       grpc_chttp2_stream_map_find(&t->parsing_stream_map, id);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
   return s ? &s->parsing : NULL;
 }
 
 grpc_chttp2_stream_parsing *grpc_chttp2_parsing_accept_stream(
     grpc_exec_ctx *exec_ctx, grpc_chttp2_transport_parsing *transport_parsing,
     uint32_t id) {
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//server side UCX_TIMER_START(UCXTL_CHTTP2);
   grpc_chttp2_stream *accepting;
   grpc_chttp2_transport *t = TRANSPORT_FROM_PARSING(transport_parsing);
   GPR_ASSERT(t->accepting_stream == NULL);
@@ -685,6 +693,7 @@ static void finish_global_actions(grpc_exec_ctx *exec_ctx,
   grpc_chttp2_executor_action_header *next;
 
   GPR_TIMER_BEGIN("finish_global_actions", 0);
+  assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//UCX_TIMER_START(UCXTL_CHTTP2);
 
   for (;;) {
     check_read_ops(exec_ctx, &t->global);
@@ -731,7 +740,7 @@ static void finish_global_actions(grpc_exec_ctx *exec_ctx,
     }
     break;
   }
-
+  //UCX_TIMER_END(UCXTL_CHTTP2);
   GPR_TIMER_END("finish_global_actions", 0);
 }
 
@@ -743,7 +752,14 @@ void grpc_chttp2_run_with_global_lock(grpc_exec_ctx *exec_ctx,
   grpc_chttp2_executor_action_header *hdr;
 
   GPR_TIMER_BEGIN("grpc_chttp2_run_with_global_lock", 0);
-
+  uint64_t ucx_timerUCXTL_CHTTP2 = 0;
+  int start_prof = 0;
+  if (0 == ucx_timer_mtx[UCXTL_CHTTP2]) {//server side
+      ucx_timerUCXTL_CHTTP2 = timer_nano();
+      ucx_timer_mtx[UCXTL_CHTTP2] = 1;
+      start_prof = 1;
+  }
+  //assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);
   REF_TRANSPORT(t, "run_global");
   gpr_mu_lock(&t->executor.mu);
 
@@ -793,6 +809,9 @@ void grpc_chttp2_run_with_global_lock(grpc_exec_ctx *exec_ctx,
   UNREF_TRANSPORT(exec_ctx, t, "run_global");
 
   GPR_TIMER_END("grpc_chttp2_run_with_global_lock", 0);
+  if (start_prof) {
+      UCX_TIMER_END(UCXTL_CHTTP2);
+  }
 }
 
 /*******************************************************************************
@@ -893,8 +912,10 @@ static void initiate_writing_locked(grpc_exec_ctx *exec_ctx,
 
 static void initiate_writing(grpc_exec_ctx *exec_ctx, void *arg,
                              grpc_error *error) {
-  grpc_chttp2_run_with_global_lock(exec_ctx, arg, NULL, initiate_writing_locked,
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_run_with_global_lock(exec_ctx, arg, NULL, initiate_writing_locked,
                                    NULL, 0);
+    UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 void grpc_chttp2_become_writable(grpc_exec_ctx *exec_ctx,
@@ -981,17 +1002,21 @@ static void terminate_writing_with_lock(grpc_exec_ctx *exec_ctx,
 
 void grpc_chttp2_terminate_writing(grpc_exec_ctx *exec_ctx,
                                    void *transport_writing, grpc_error *error) {
-  grpc_chttp2_transport *t = TRANSPORT_FROM_WRITING(transport_writing);
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_transport *t = TRANSPORT_FROM_WRITING(transport_writing);
   grpc_chttp2_run_with_global_lock(
       exec_ctx, t, NULL, terminate_writing_with_lock, GRPC_ERROR_REF(error), 0);
+  UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 static void writing_action(grpc_exec_ctx *exec_ctx, void *gt,
                            grpc_error *error) {
-  grpc_chttp2_transport *t = gt;
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_transport *t = gt;
   GPR_TIMER_BEGIN("writing_action", 0);
   grpc_chttp2_perform_writes(exec_ctx, &t->writing, t->ep);
   GPR_TIMER_END("writing_action", 0);
+  UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 void grpc_chttp2_add_incoming_goaway(
@@ -1131,6 +1156,7 @@ static void perform_stream_op_locked(grpc_exec_ctx *exec_ctx,
                                      grpc_chttp2_transport *t,
                                      grpc_chttp2_stream *s, void *stream_op) {
   GPR_TIMER_BEGIN("perform_stream_op_locked", 0);
+  assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//UCX_TIMER_START(UCXTL_CHTTP2);
 
   grpc_transport_stream_op *op = stream_op;
   grpc_chttp2_transport_global *transport_global = &t->global;
@@ -1312,6 +1338,7 @@ static void perform_stream_op_locked(grpc_exec_ctx *exec_ctx,
                                     &on_complete, GRPC_ERROR_NONE);
 
   GPR_TIMER_END("perform_stream_op_locked", 0);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 static void perform_stream_op(grpc_exec_ctx *exec_ctx, grpc_transport *gt,
@@ -1951,8 +1978,10 @@ static void reading_action(grpc_exec_ctx *exec_ctx, void *tp,
      reading_action_locked ->
        (parse_unlocked -> post_parse_locked)? ->
        post_reading_action_locked */
-  grpc_chttp2_run_with_global_lock(exec_ctx, tp, NULL, reading_action_locked,
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_run_with_global_lock(exec_ctx, tp, NULL, reading_action_locked,
                                    GRPC_ERROR_REF(error), 0);
+    UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 static void reading_action_locked(grpc_exec_ctx *exec_ctx,
@@ -1977,6 +2006,7 @@ static void reading_action_locked(grpc_exec_ctx *exec_ctx,
 
 static grpc_error *try_http_parsing(grpc_exec_ctx *exec_ctx,
                                     grpc_chttp2_transport *t) {
+    UCX_TIMER_START(UCXTL_CHTTP2);
   grpc_http_parser parser;
   size_t i = 0;
   grpc_error *error = GRPC_ERROR_NONE;
@@ -1999,12 +2029,14 @@ static grpc_error *try_http_parsing(grpc_exec_ctx *exec_ctx,
 
   grpc_http_parser_destroy(&parser);
   grpc_http_response_destroy(&response);
+  UCX_TIMER_END(UCXTL_CHTTP2);
   return error;
 }
 
 static void parsing_action(grpc_exec_ctx *exec_ctx, void *arg,
                            grpc_error *error) {
-  grpc_chttp2_transport *t = arg;
+    UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_transport *t = arg;
   grpc_error *err = GRPC_ERROR_NONE;
   GPR_TIMER_BEGIN("reading_action.parse", 0);
   size_t i = 0;
@@ -2027,11 +2059,14 @@ static void parsing_action(grpc_exec_ctx *exec_ctx, void *arg,
   GPR_TIMER_END("reading_action.parse", 0);
   grpc_chttp2_run_with_global_lock(exec_ctx, t, NULL, post_parse_locked, err,
                                    0);
+  UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 static void post_parse_locked(grpc_exec_ctx *exec_ctx, grpc_chttp2_transport *t,
                               grpc_chttp2_stream *s_unused, void *arg) {
-  grpc_chttp2_transport_global *transport_global = &t->global;
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//UCX_TIMER_START(UCXTL_CHTTP2);
+
+    grpc_chttp2_transport_global *transport_global = &t->global;
   grpc_chttp2_transport_parsing *transport_parsing = &t->parsing;
   /* copy parsing qbuf to global qbuf */
   if (t->parsing.qbuf.count > 0) {
@@ -2074,13 +2109,17 @@ static void post_parse_locked(grpc_exec_ctx *exec_ctx, grpc_chttp2_transport *t,
   }
 
   post_reading_action_locked(exec_ctx, t, s_unused, arg);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
+
 }
 
 static void post_reading_action_locked(grpc_exec_ctx *exec_ctx,
                                        grpc_chttp2_transport *t,
                                        grpc_chttp2_stream *s_unused,
                                        void *arg) {
-  grpc_error *error = arg;
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//UCX_TIMER_START(UCXTL_CHTTP2);
+
+    grpc_error *error = arg;
   bool keep_reading = false;
   if (error == GRPC_ERROR_NONE && t->closed) {
     error = GRPC_ERROR_CREATE("Transport closed");
@@ -2108,12 +2147,19 @@ static void post_reading_action_locked(grpc_exec_ctx *exec_ctx,
   GRPC_ERROR_UNREF(error);
 
   if (keep_reading) {
+
+    uint64_t ucx_timer1 = timer_nano();
     grpc_endpoint_read(exec_ctx, t->ep, &t->read_buffer, &t->reading_action);
+    uint64_t ucx_timer2 = timer_nano() - ucx_timer1;
+    ucx_timer[UCXTL_CHTTP2] -= ucx_timer2;
+
     allow_endpoint_shutdown_locked(exec_ctx, t);
     UNREF_TRANSPORT(exec_ctx, t, "keep_reading");
   } else {
     UNREF_TRANSPORT(exec_ctx, t, "reading_action");
   }
+  //UCX_TIMER_END(UCXTL_CHTTP2);
+
 }
 
 /*******************************************************************************
@@ -2184,6 +2230,8 @@ static void incoming_byte_stream_update_flow_control(
     grpc_exec_ctx *exec_ctx, grpc_chttp2_transport_global *transport_global,
     grpc_chttp2_stream_global *stream_global, size_t max_size_hint,
     size_t have_already) {
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//UCX_TIMER_START(UCXTL_CHTTP2);
+
   uint32_t max_recv_bytes;
 
   /* clamp max recv hint to an allowable size */
@@ -2219,6 +2267,7 @@ static void incoming_byte_stream_update_flow_control(
     grpc_chttp2_become_writable(exec_ctx, transport_global, stream_global,
                                 false, "read_incoming_stream");
   }
+  //UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 typedef struct {
@@ -2232,7 +2281,16 @@ static void incoming_byte_stream_next_locked(grpc_exec_ctx *exec_ctx,
                                              grpc_chttp2_transport *t,
                                              grpc_chttp2_stream *s,
                                              void *argp) {
-  incoming_byte_stream_next_arg *arg = argp;
+    uint64_t ucx_timerUCXTL_CHTTP2 = 0;
+    int start_prof = 0;
+    if (0 == ucx_timer_mtx[UCXTL_CHTTP2]) {//server side
+        ucx_timerUCXTL_CHTTP2 = timer_nano();
+        ucx_timer_mtx[UCXTL_CHTTP2] = 1;
+        start_prof = 1;
+    }
+    //UCX_TIMER_START(UCXTL_CHTTP2);
+
+    incoming_byte_stream_next_arg *arg = argp;
   grpc_chttp2_incoming_byte_stream *bs =
       (grpc_chttp2_incoming_byte_stream *)arg->byte_stream;
   grpc_chttp2_transport_global *transport_global = &bs->transport->global;
@@ -2254,19 +2312,25 @@ static void incoming_byte_stream_next_locked(grpc_exec_ctx *exec_ctx,
     bs->next = arg->slice;
   }
   incoming_byte_stream_unref(exec_ctx, bs);
+  if (start_prof) {
+      UCX_TIMER_END(UCXTL_CHTTP2);
+  }
+
 }
 
 static int incoming_byte_stream_next(grpc_exec_ctx *exec_ctx,
                                      grpc_byte_stream *byte_stream,
                                      gpr_slice *slice, size_t max_size_hint,
                                      grpc_closure *on_complete) {
-  grpc_chttp2_incoming_byte_stream *bs =
+    //UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_incoming_byte_stream *bs =
       (grpc_chttp2_incoming_byte_stream *)byte_stream;
   incoming_byte_stream_next_arg arg = {bs, slice, max_size_hint, on_complete};
   gpr_ref(&bs->refs);
   grpc_chttp2_run_with_global_lock(exec_ctx, bs->transport, bs->stream,
                                    incoming_byte_stream_next_locked, &arg,
                                    sizeof(arg));
+  //UCX_TIMER_END(UCXTL_CHTTP2);
   return 0;
 }
 
@@ -2286,10 +2350,12 @@ static void incoming_byte_stream_destroy_locked(grpc_exec_ctx *exec_ctx,
 
 static void incoming_byte_stream_destroy(grpc_exec_ctx *exec_ctx,
                                          grpc_byte_stream *byte_stream) {
-  grpc_chttp2_incoming_byte_stream *bs =
+    //UCX_TIMER_START(UCXTL_CHTTP2);
+    grpc_chttp2_incoming_byte_stream *bs =
       (grpc_chttp2_incoming_byte_stream *)byte_stream;
   grpc_chttp2_run_with_global_lock(exec_ctx, bs->transport, bs->stream,
                                    incoming_byte_stream_destroy_locked, bs, 0);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
 }
 
 typedef struct {
@@ -2301,7 +2367,9 @@ static void incoming_byte_stream_push_locked(grpc_exec_ctx *exec_ctx,
                                              grpc_chttp2_transport *t,
                                              grpc_chttp2_stream *s,
                                              void *argp) {
-  incoming_byte_stream_push_arg *arg = argp;
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//server side UCX_TIMER_START(UCXTL_CHTTP2);
+
+    incoming_byte_stream_push_arg *arg = argp;
   grpc_chttp2_incoming_byte_stream *bs = arg->byte_stream;
   if (bs->on_next != NULL) {
     *bs->next = arg->slice;
@@ -2311,6 +2379,8 @@ static void incoming_byte_stream_push_locked(grpc_exec_ctx *exec_ctx,
     gpr_slice_buffer_add(&bs->slices, arg->slice);
   }
   incoming_byte_stream_unref(exec_ctx, bs);
+  //UCX_TIMER_END(UCXTL_CHTTP2);
+
 }
 
 void grpc_chttp2_incoming_byte_stream_push(grpc_exec_ctx *exec_ctx,
@@ -2330,15 +2400,21 @@ typedef struct {
 
 static bs_fail_args *make_bs_fail_args(grpc_chttp2_incoming_byte_stream *bs,
                                        grpc_error *error) {
-  bs_fail_args *a = gpr_malloc(sizeof(*a));
+    UCX_TIMER_START(UCXTL_CHTTP2);
+
+    bs_fail_args *a = gpr_malloc(sizeof(*a));
   a->bs = bs;
   a->error = error;
+  UCX_TIMER_END(UCXTL_CHTTP2);
+
   return a;
 }
 
 static void incoming_byte_stream_finished_failed_locked(
     grpc_exec_ctx *exec_ctx, grpc_chttp2_transport *t, grpc_chttp2_stream *s,
     void *argp) {
+    UCX_TIMER_START(UCXTL_CHTTP2);
+
   bs_fail_args *a = argp;
   grpc_chttp2_incoming_byte_stream *bs = a->bs;
   grpc_error *error = a->error;
@@ -2348,6 +2424,8 @@ static void incoming_byte_stream_finished_failed_locked(
   GRPC_ERROR_UNREF(bs->error);
   bs->error = error;
   incoming_byte_stream_unref(exec_ctx, bs);
+  UCX_TIMER_END(UCXTL_CHTTP2);
+
 }
 
 static void incoming_byte_stream_finished_ok_locked(grpc_exec_ctx *exec_ctx,
@@ -2387,6 +2465,8 @@ grpc_chttp2_incoming_byte_stream *grpc_chttp2_incoming_byte_stream_create(
     grpc_exec_ctx *exec_ctx, grpc_chttp2_transport_parsing *transport_parsing,
     grpc_chttp2_stream_parsing *stream_parsing, uint32_t frame_size,
     uint32_t flags, grpc_chttp2_incoming_frame_queue *add_to_queue) {
+    assert(1 == ucx_timer_mtx[UCXTL_CHTTP2]);//server side UCX_TIMER_START(UCXTL_CHTTP2);
+
   grpc_chttp2_incoming_byte_stream *incoming_byte_stream =
       gpr_malloc(sizeof(*incoming_byte_stream));
   incoming_byte_stream->base.length = frame_size;
@@ -2409,6 +2489,8 @@ grpc_chttp2_incoming_byte_stream *grpc_chttp2_incoming_byte_stream_create(
     add_to_queue->tail->next_message = incoming_byte_stream;
   }
   add_to_queue->tail = incoming_byte_stream;
+  //UCX_TIMER_END(UCXTL_CHTTP2);
+
   return incoming_byte_stream;
 }
 
@@ -2539,8 +2621,12 @@ grpc_transport *grpc_create_chttp2_transport(
 void grpc_chttp2_transport_start_reading(grpc_exec_ctx *exec_ctx,
                                          grpc_transport *transport,
                                          gpr_slice *slices, size_t nslices) {
-  grpc_chttp2_transport *t = (grpc_chttp2_transport *)transport;
+    UCX_TIMER_START(UCXTL_CHTTP2);
+
+    grpc_chttp2_transport *t = (grpc_chttp2_transport *)transport;
   REF_TRANSPORT(t, "reading_action"); /* matches unref inside reading_action */
   gpr_slice_buffer_addn(&t->read_buffer, slices, nslices);
+  UCX_TIMER_END(UCXTL_CHTTP2);
   reading_action(exec_ctx, t, GRPC_ERROR_NONE);
+
 }

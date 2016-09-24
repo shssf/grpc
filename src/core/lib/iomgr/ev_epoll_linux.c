@@ -61,6 +61,7 @@
 #include "src/core/lib/iomgr/ucx_transport.h"
 #include "src/core/lib/profiling/timers.h"
 #include "src/core/lib/support/block_annotate.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 
 /* TODO: sreek - Move this to init.c and initialize this like other tracers. */
 static int grpc_polling_trace = 0; /* Disabled by default */
@@ -1365,9 +1366,11 @@ static void pollset_work_and_unlock(grpc_exec_ctx *exec_ctx,
   do {
       ep_rv = 0;
       GRPC_POLLING_TRACE("epoll_pwait pool_fd=%d enter timeout=%d", epoll_fd, timeout_ms);
-
+      ucx_timer_mtx[UCXTL_EPOLL_WAIT] = 0;
+      UCX_TIMER_START(UCXTL_EPOLL_WAIT);
       ep_rv = epoll_pwait(epoll_fd, ep_ev, GRPC_EPOLL_MAX_EVENTS, timeout_ms, sig_mask);
-
+      ucx_timer_mtx[UCXTL_EPOLL_WAIT] = 1;
+      UCX_TIMER_END(UCXTL_EPOLL_WAIT);
       if (ep_rv > 0) {
           grpc_fd *fd_tmp = ep_ev->data.ptr;
           GRPC_POLLING_TRACE("epoll_pwait pool_fd=%d exit ret=%d wake_fd=%d data_ptr=%p",
@@ -1387,7 +1390,9 @@ static void pollset_work_and_unlock(grpc_exec_ctx *exec_ctx,
                  epoll_wait to see if there are any other events of interest */
           GRPC_POLLING_TRACE("pollset_work: pollset: %p, worker: %p received kick",
                   (void *)pollset, (void *)worker);
+          //UCX_TIMER_START(UCXTL_EPOLL_WAIT);
           ep_rv = epoll_wait(epoll_fd, ep_ev, GRPC_EPOLL_MAX_EVENTS, 0);
+          //UCX_TIMER_END(UCXTL_EPOLL_WAIT);
         }
       }
 

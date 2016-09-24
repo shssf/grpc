@@ -49,6 +49,7 @@
 #include "src/core/lib/surface/channel.h"
 #include "src/core/lib/surface/channel_init.h"
 #include "src/core/lib/transport/connectivity_state.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 
 #define INTERNAL_REF_BITS 16
 #define STRONG_REF_MASK (~(gpr_atm)((1 << INTERNAL_REF_BITS) - 1))
@@ -693,7 +694,9 @@ void grpc_subchannel_call_process_op(grpc_exec_ctx *exec_ctx,
   GPR_TIMER_BEGIN("grpc_subchannel_call_process_op", 0);
   grpc_call_stack *call_stack = SUBCHANNEL_CALL_TO_CALL_STACK(call);
   grpc_call_element *top_elem = grpc_call_stack_element(call_stack, 0);
+  UCX_TIMER_START(UCXTL_CHTTP2);
   top_elem->filter->start_transport_stream_op(exec_ctx, top_elem, op);
+  UCX_TIMER_END(UCXTL_CHTTP2);
   GPR_TIMER_END("grpc_subchannel_call_process_op", 0);
 }
 
@@ -711,8 +714,10 @@ grpc_subchannel_call *grpc_connected_subchannel_create_call(
   grpc_call_stack *callstk = SUBCHANNEL_CALL_TO_CALL_STACK(call);
   call->connection = con;
   GRPC_CONNECTED_SUBCHANNEL_REF(con, "subchannel_call");
+  UCX_TIMER_START(UCXTL_CHTTP2);
   grpc_call_stack_init(exec_ctx, chanstk, 1, subchannel_call_destroy, call,
                        NULL, NULL, callstk);
+  UCX_TIMER_END(UCXTL_CHTTP2);
   grpc_call_stack_set_pollset_or_pollset_set(exec_ctx, callstk, pollent);
   return call;
 }

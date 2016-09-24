@@ -39,7 +39,7 @@
 
 #include "src/core/ext/transport/chttp2/transport/http2_errors.h"
 #include "src/core/lib/profiling/timers.h"
-
+#include "src/core/lib/iomgr/ucx_timers.h"
 static void finalize_outbuf(grpc_exec_ctx *exec_ctx,
                             grpc_chttp2_transport_writing *transport_writing);
 
@@ -188,8 +188,12 @@ void grpc_chttp2_perform_writes(
   GPR_ASSERT(endpoint);
 
   if (transport_writing->outbuf.count > 0) {
+      uint64_t ucx_timer1 = timer_nano();
     grpc_endpoint_write(exec_ctx, endpoint, &transport_writing->outbuf,
                         &transport_writing->done_cb);
+    uint64_t ucx_timer2 = timer_nano() - ucx_timer1;
+    ucx_timer[UCXTL_CHTTP2] -= ucx_timer2;
+
   } else {
     grpc_exec_ctx_sched(exec_ctx, &transport_writing->done_cb, GRPC_ERROR_NONE,
                         NULL);

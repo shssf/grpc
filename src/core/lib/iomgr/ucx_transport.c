@@ -14,6 +14,7 @@
 #include "src/core/lib/iomgr/network_status_tracker.h"
 #include "src/core/lib/iomgr/ucx_transport.h"
 #include "src/core/lib/iomgr/ev_posix.h"
+#include "src/core/lib/iomgr/ucx_timers.h"
 #include "src/core/lib/support/string.h"
 
 #include <errno.h>
@@ -63,9 +64,11 @@ static void request_init(void *request)
 
 static void ucx_wait(ucp_worker_h ucp_worker, ucx_request *context)
 {
+    //UCX_TIMER_START(UCXTL_EPOLL_WAIT);
     while (context->completed == 0) {
         ucp_worker_progress(ucp_worker);
     }
+    //UCX_TIMER_END(UCXTL_EPOLL_WAIT);
 }
 
 static void ucx_send_msg(void *buf, size_t len)
@@ -73,7 +76,7 @@ static void ucx_send_msg(void *buf, size_t len)
     ucx_request *request = 0;
 
     GPR_ASSERT(NULL != ucx_ep);
-
+    UCX_TIMER_START(UCXTL_UCX);
     request = ucp_tag_send_nb(ucx_ep, buf, len, ucp_dt_make_contig(1), 1, send_handle);
     if (UCS_PTR_IS_ERR(request)) {
         gpr_log(GPR_DEBUG, "UCX ucx_send_msg unable to send message len=%lu", len);
@@ -85,6 +88,7 @@ static void ucx_send_msg(void *buf, size_t len)
         ucx_wait(ucx_worker, request);
         ucp_request_release(request);
     }
+    UCX_TIMER_END(UCXTL_UCX);
 }
 
 static size_t ucx_recv_msg(void *buf, size_t len)
@@ -99,16 +103,20 @@ static size_t ucx_recv_msg(void *buf, size_t len)
 
     GPR_ASSERT(NULL != ucx_worker);
 
+    UCX_TIMER_START(UCXTL_EPOLL_WAIT);
     do {
         /* if no message here -> do blocking receive */
         ucp_worker_progress(ucx_worker);
         msg_tag = ucp_tag_probe_nb(ucx_worker, 1, (ucp_tag_t)-1, 1, &info_tag);
     } while (msg_tag == NULL);
+    UCX_TIMER_END(UCXTL_EPOLL_WAIT);
 
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_recv_msg TAG=%lu length=%lu len=%lu", info_tag.sender_tag, info_tag.length, len);
     }
     GPR_ASSERT(info_tag.length <= len);
+
+    UCX_TIMER_START(UCXTL_UCX);
 
     request = ucp_tag_msg_recv_nb(ucx_worker, buf, info_tag.length,
                                   ucp_dt_make_contig(1), msg_tag, recv_handle);
@@ -122,11 +130,13 @@ static size_t ucx_recv_msg(void *buf, size_t len)
             gpr_log(GPR_DEBUG, "UCX ucx_recv_msg data message was received after WAIT");
         }
     }
+    UCX_TIMER_END(UCXTL_UCX);
     return info_tag.length;
 }
 
 static void ucx_internal_read(grpc_exec_ctx *exec_ctx, grpc_ucx *ucx)
 {
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_internal_read slice_len=%lu buf_len=%lu",
                 GPR_SLICE_LENGTH(ucx->incoming_buffer->slices[0]),
@@ -139,13 +149,16 @@ static void ucx_internal_read(grpc_exec_ctx *exec_ctx, grpc_ucx *ucx)
     GPR_ASSERT(NULL != ucx_ep);
     GPR_ASSERT(0 == ucx->incoming_buffer->length);
 
+    UCX_TIMER_START(UCXTL_EPOLL_WAIT);
     ucp_worker_progress(ucx_worker);
     msg_tag = ucp_tag_probe_nb(ucx_worker, 1, (ucp_tag_t)-1, 0, &info_tag);
+    UCX_TIMER_END(UCXTL_EPOLL_WAIT);
     if (NULL == msg_tag) {
         if (grpc_ucx_trace) {
             gpr_log(GPR_DEBUG, "UCX ucx_internal_read -> nothing to receive -> grpc_fd_notify_on_read");
         }
         grpc_fd_notify_on_read(exec_ctx, ucx->em_fd, &ucx->read_closure);
+        UCX_TIMER_END(UCXTL_ENDPOINT);
         return;
     }
 
@@ -160,19 +173,30 @@ static void ucx_internal_read(grpc_exec_ctx *exec_ctx, grpc_ucx *ucx)
         grpc_error *err = GRPC_ERROR_CREATE("EOF");
         grpc_exec_ctx_sched(exec_ctx, cb, err, NULL);
         //TCP_UNREF(exec_ctx, tcp, "read");
+        UCX_TIMER_END(UCXTL_ENDPOINT);
         return;
     }
 
     /* Receive slice by slice */
     size_t recv_slices_num = 0, ucx_bytes_read = 0;
+
+    uint64_t ucx_timer1 = timer_nano();
     ucx_bytes_read = ucx_recv_msg(&recv_slices_num, sizeof(recv_slices_num));
+    uint64_t ucx_timer2 = timer_nano() - ucx_timer1;
+    ucx_timer[UCXTL_ENDPOINT] -= ucx_timer2;
+
 
     for (size_t i = 0; i < recv_slices_num; ++i) {
         gpr_slice_buffer_add(ucx->incoming_buffer, gpr_slice_malloc(ucx->slice_size));
 
         void *ptr = GPR_SLICE_START_PTR(ucx->incoming_buffer->slices[i]);
         size_t ptr_len = GPR_SLICE_LENGTH(ucx->incoming_buffer->slices[i]);
+
+        uint64_t ucx_timer12 = timer_nano();
         size_t ucx_bytes_read_local = ucx_recv_msg(ptr, ptr_len);
+        uint64_t ucx_timer22 = timer_nano() - ucx_timer12;
+        ucx_timer[UCXTL_ENDPOINT] -= ucx_timer22;
+
         ucx->incoming_buffer->slices[i].data.refcounted.length = ucx_bytes_read_local;
 
         ucx_bytes_read += ucx_bytes_read_local;
@@ -195,12 +219,13 @@ static void ucx_internal_read(grpc_exec_ctx *exec_ctx, grpc_ucx *ucx)
     ucx->incoming_buffer = NULL;
     grpc_error *error = GRPC_ERROR_NONE;
     grpc_exec_ctx_sched(exec_ctx, cb, error, NULL);
+    UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void ucx_read(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep, gpr_slice_buffer *incoming_buffer, grpc_closure *cb)
 {
     grpc_ucx *ucx = (grpc_ucx *)ep;
-
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     GPR_ASSERT(ucx->read_cb == NULL);
     ucx->read_cb = cb;
     ucx->incoming_buffer = incoming_buffer;
@@ -217,6 +242,7 @@ static void ucx_read(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep, gpr_slice_buffe
         }
         grpc_exec_ctx_sched(exec_ctx, &ucx->read_closure, GRPC_ERROR_NONE, NULL);
     }
+    UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void ucx_handle_read(grpc_exec_ctx *exec_ctx, void *arg /* grpc_ucx */, grpc_error *error)
@@ -242,6 +268,7 @@ static void ucx_handle_read(grpc_exec_ctx *exec_ctx, void *arg /* grpc_ucx */, g
 
 static void ucx_write(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep, gpr_slice_buffer *buf, grpc_closure *cb)
 {
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     grpc_ucx *ucx = (grpc_ucx *)ep;
     if (1 < grpc_ucx_trace) {
         for (size_t i = 0; i < buf->count; i++) {
@@ -254,11 +281,18 @@ static void ucx_write(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep, gpr_slice_buff
     GPR_TIMER_BEGIN("ucx_write", 0);
 
     /* Send slice by slice */
+    uint64_t ucx_timer21 = timer_nano();
     ucx_send_msg(&buf->count, sizeof(buf->count));
+    uint64_t ucx_timer212 = timer_nano() - ucx_timer21;
+    ucx_timer[UCXTL_ENDPOINT] -= ucx_timer212;
+
     for (size_t i = 0; i < buf->count; i++) {
         void *ptr = GPR_SLICE_START_PTR(buf->slices[i]);
         size_t ptr_len = GPR_SLICE_LENGTH(buf->slices[i]);
+        uint64_t ucx_timer1 = timer_nano();
         ucx_send_msg(ptr, ptr_len);
+        uint64_t ucx_timer2 = timer_nano() - ucx_timer1;
+        ucx_timer[UCXTL_ENDPOINT] -= ucx_timer2;
     }
 
     grpc_error *error = GRPC_ERROR_NONE;
@@ -269,35 +303,43 @@ static void ucx_write(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep, gpr_slice_buff
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_wrote total bytes=%lu", buf->length);
     }
+    UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static grpc_workqueue *ucx_get_workqueue(grpc_endpoint *ep)
 {
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     grpc_ucx *ucx = (grpc_ucx *)ep;
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_get_workqueue");
     }
-    return grpc_fd_get_workqueue(ucx->em_fd);
+    grpc_workqueue *tmp = grpc_fd_get_workqueue(ucx->em_fd);
+    UCX_TIMER_END(UCXTL_ENDPOINT);
+    return tmp;
 }
 
 static void ucx_add_to_pollset(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
                                grpc_pollset *pollset)
 {
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     grpc_ucx *ucx = (grpc_ucx *)ep;
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_add_to_pollset fd=%d", grpc_fd_wrapped_fd(ucx->em_fd));
     }
     grpc_pollset_add_fd(exec_ctx, pollset, ucx->em_fd);
+    UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void ucx_add_to_pollset_set(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep,
                                    grpc_pollset_set *pollset_set)
 {
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     grpc_ucx *ucx = (grpc_ucx *)ep;
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_add_to_pollset_set fd=%d", grpc_fd_wrapped_fd(ucx->em_fd));
     }
     grpc_pollset_set_add_fd(exec_ctx, pollset_set, ucx->em_fd);
+    UCX_TIMER_END(UCXTL_ENDPOINT);
 }
 
 static void ucx_shutdown(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep)
@@ -325,11 +367,14 @@ static void ucx_destroy(grpc_exec_ctx *exec_ctx, grpc_endpoint *ep)
 
 static char *ucx_get_peer(grpc_endpoint *ep)
 {
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     grpc_ucx *ucx = (grpc_ucx *)ep;
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX ucx_get_peer: %s", ucx->peer_string);
     }
-    return gpr_strdup(ucx->peer_string);
+    char *tmp = gpr_strdup(ucx->peer_string);
+    UCX_TIMER_END(UCXTL_ENDPOINT);
+    return tmp;
 }
 
 static const grpc_endpoint_vtable vtable = {ucx_read,
@@ -346,7 +391,7 @@ grpc_endpoint *grpc_ucx_create(grpc_fd *em_fd, size_t slice_size, const char *pe
     if (grpc_ucx_trace) {
         gpr_log(GPR_DEBUG, "UCX grpc_ucx_create fd=%d grpc_fd=%p slice_size=%lu peer=%s", grpc_fd_wrapped_fd(em_fd), em_fd, slice_size, peer_string);
     }
-
+    UCX_TIMER_START(UCXTL_ENDPOINT);
     grpc_ucx *ucx = (grpc_ucx *)gpr_malloc(sizeof(grpc_ucx));
     ucx->base.vtable         = &vtable;
     ucx->peer_string         = gpr_strdup(peer_string);
@@ -359,7 +404,7 @@ grpc_endpoint *grpc_ucx_create(grpc_fd *em_fd, size_t slice_size, const char *pe
 
   /* Tell network status tracker about new endpoint */
   grpc_network_status_register_endpoint(&ucx->base);
-
+  UCX_TIMER_END(UCXTL_ENDPOINT);
   return &ucx->base;
 }
 
@@ -369,8 +414,9 @@ static int ucx_fd()
     ucs_status_t status;
 
     GPR_ASSERT(NULL != ucx_ep);
-
+    UCX_TIMER_START(UCXTL_UCX);
     status = ucp_worker_get_efd(ucx_worker, &epoll_fd);
+    UCX_TIMER_END(UCXTL_UCX);
     GPR_ASSERT(UCS_OK == status);
 
     if (grpc_ucx_trace) {
@@ -395,6 +441,8 @@ static void ucx_init()
     GPR_ASSERT(NULL == ucx_worker);
     GPR_ASSERT(NULL == ucx_ep);
 
+    //UCX_TIMER_START(UCXTL_UCX);
+
     status = ucp_config_read(NULL, NULL, &config);
     if (status != UCS_OK) {
         gpr_log(GPR_DEBUG, "UCX ucp_config_read failed");
@@ -415,6 +463,7 @@ static void ucx_init()
         gpr_log(GPR_DEBUG, "UCX ucp_init failed");
         return;
     }
+    //UCX_TIMER_END(UCXTL_UCX);
 }
 
 static void wait_fd(int epoll_fd)
@@ -570,9 +619,15 @@ void ucx_prepare_fd()
     if (NULL == ucx_ep) {
         return;
     }
+    UCX_TIMER_START(UCXTL_EPOLL_WAIT);
     status = ucp_worker_arm(ucx_worker);
     if (status != UCS_OK) {
         gpr_log(GPR_DEBUG, "UCX ucx_prepre_fd failed");
         return;
     }
+    UCX_TIMER_END(UCXTL_EPOLL_WAIT);
 }
+
+
+uint64_t ucx_timer[UCXTL_SIZE];
+uint64_t ucx_timer_mtx[UCXTL_SIZE];

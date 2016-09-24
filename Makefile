@@ -62,12 +62,12 @@ HAS_CC = $(shell which cc > /dev/null 2> /dev/null && echo true || echo false)
 HAS_CLANG = $(shell which clang > /dev/null 2> /dev/null && echo true || echo false)
 
 ifeq ($(HAS_CC),true)
-DEFAULT_CC = cc
-DEFAULT_CXX = c++
-else
-ifeq ($(HAS_GCC),true)
 DEFAULT_CC = gcc
 DEFAULT_CXX = g++
+else
+ifeq ($(HAS_GCC),true)
+DEFAULT_CC = gcc -fno-omit-frame-pointer
+DEFAULT_CXX = g++ -fno-omit-frame-pointer
 else
 ifeq ($(HAS_CLANG),true)
 DEFAULT_CC = clang
@@ -255,7 +255,7 @@ DEFINES_gcov = _DEBUG DEBUG GPR_GCOV
 # General settings.
 # You may want to change these depending on your system.
 
-prefix ?= /usr/local
+prefix ?= /auto/mtrswgwork/sergeysh/myGRPC/grpc/install-bin-dbg
 
 PROTOC ?= protoc
 DTRACE ?= dtrace
@@ -316,19 +316,19 @@ endif
 CXX11_CHECK_CMD = $(CXX) -std=c++11 -o $(TMPOUT) -c test/build/c++11.cc
 HAS_CXX11 = $(shell $(CXX11_CHECK_CMD) 2> /dev/null && echo true || echo false)
 
-CHECK_SHADOW_WORKS_CMD = $(CC) -std=c99 -Werror -Wshadow -o $(TMPOUT) -c test/build/shadow.c
+CHECK_SHADOW_WORKS_CMD = $(CC) -std=c99 -Wshadow -o $(TMPOUT) -c test/build/shadow.c
 HAS_WORKING_SHADOW = $(shell $(CHECK_SHADOW_WORKS_CMD) 2> /dev/null && echo true || echo false)
 ifeq ($(HAS_WORKING_SHADOW),true)
 W_SHADOW=-Wshadow
 NO_W_SHADOW=-Wno-shadow
 endif
-CHECK_EXTRA_SEMI_WORKS_CMD = $(CC) -std=c99 -Werror -Wextra-semi -o $(TMPOUT) -c test/build/extra-semi.c
+CHECK_EXTRA_SEMI_WORKS_CMD = $(CC) -std=c99 -Wextra-semi -o $(TMPOUT) -c test/build/extra-semi.c
 HAS_WORKING_EXTRA_SEMI = $(shell $(CHECK_EXTRA_SEMI_WORKS_CMD) 2> /dev/null && echo true || echo false)
 ifeq ($(HAS_WORKING_EXTRA_SEMI),true)
 W_EXTRA_SEMI=-Wextra-semi
 NO_W_EXTRA_SEMI=-Wno-extra-semi
 endif
-CHECK_NO_SHIFT_NEGATIVE_VALUE_WORKS_CMD = $(CC) -std=c99 -Werror -Wno-shift-negative-value -o $(TMPOUT) -c test/build/no-shift-negative-value.c
+CHECK_NO_SHIFT_NEGATIVE_VALUE_WORKS_CMD = $(CC) -std=c99 -Wno-shift-negative-value -o $(TMPOUT) -c test/build/no-shift-negative-value.c
 HAS_WORKING_NO_SHIFT_NEGATIVE_VALUE = $(shell $(CHECK_NO_SHIFT_NEGATIVE_VALUE_WORKS_CMD) 2> /dev/null && echo true || echo false)
 ifeq ($(HAS_WORKING_NO_SHIFT_NEGATIVE_VALUE),true)
 W_NO_SHIFT_NEGATIVE_VALUE=-Wno-shift-negative-value
@@ -349,13 +349,13 @@ ifdef EXTRA_DEFINES
 DEFINES += $(EXTRA_DEFINES)
 endif
 
-CFLAGS += -std=c99 -Wsign-conversion -Wconversion $(W_SHADOW) $(W_EXTRA_SEMI)
+CFLAGS += -std=c99 -fno-omit-frame-pointer -Wsign-conversion -Wconversion $(W_SHADOW) $(W_EXTRA_SEMI)
 ifeq ($(HAS_CXX11),true)
-CXXFLAGS += -std=c++11
+CXXFLAGS += -std=c++11 -fno-omit-frame-pointer
 else
-CXXFLAGS += -std=c++0x
+CXXFLAGS += -std=c++0x -fno-omit-frame-pointer
 endif
-CPPFLAGS += -g -Wall -Wextra -Werror -Wno-long-long -Wno-unused-parameter
+CPPFLAGS += -g -fno-omit-frame-pointer -Wall -Wextra -Wno-long-long -Wno-unused-parameter
 LDFLAGS += -g
 
 CPPFLAGS += $(CPPFLAGS_$(CONFIG))
@@ -640,6 +640,9 @@ PC_LIBS_GRPC += -lz
 LIBS += z
 endif
 endif
+
+CPPFLAGS += -I/auto/mtrswgwork/sergeysh/mybranch/ucx/build_for_test_bin/include
+LDFLAGS += -L/auto/mtrswgwork/sergeysh/mybranch/ucx/build_for_test_bin/lib -lucp -lucs
 
 OPENSSL_PKG_CONFIG = false
 
@@ -2561,6 +2564,7 @@ LIBGRPC_SRC = \
     src/core/lib/iomgr/tcp_client_posix.c \
     src/core/lib/iomgr/tcp_client_windows.c \
     src/core/lib/iomgr/tcp_posix.c \
+    src/core/lib/iomgr/ucx_transport.c \
     src/core/lib/iomgr/tcp_server_posix.c \
     src/core/lib/iomgr/tcp_server_windows.c \
     src/core/lib/iomgr/tcp_windows.c \

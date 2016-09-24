@@ -35,6 +35,7 @@
 
 #include <sstream>
 #include <utility>
+#include <iomanip>
 
 #include <grpc++/completion_queue.h>
 #include <grpc++/generic/async_generic_service.h>
@@ -51,6 +52,7 @@
 #include <grpc/support/alloc.h>
 #include <grpc/support/log.h>
 
+#include "src/core/lib/iomgr/ucx_timers.h"
 #include "src/core/lib/profiling/timers.h"
 #include "src/cpp/server/thread_pool_interface.h"
 
@@ -125,6 +127,13 @@ class Server::ShutdownRequest GRPC_FINAL : public CompletionQueueTag {
     return false;
   }
 };
+
+static int ucx_counter = 0;
+
+struct my_timers_t {
+    uint64_t timers[UCXTL_SIZE];
+};
+std::map<uint64_t, my_timers_t> median_buffer;
 
 class Server::SyncRequest GRPC_FINAL : public CompletionQueueTag {
  public:
@@ -215,7 +224,6 @@ class Server::SyncRequest GRPC_FINAL : public CompletionQueueTag {
     }
     return true;
   }
-
   class CallData GRPC_FINAL {
    public:
     explicit CallData(Server* server, SyncRequest* mrd)
@@ -250,6 +258,31 @@ class Server::SyncRequest GRPC_FINAL : public CompletionQueueTag {
       bool ignored_ok;
       cq_.Shutdown();
       GPR_ASSERT(cq_.Next(&ignored_tag, &ignored_ok) == false);
+
+      if (!(ucx_counter % 5)) {
+        if (!median_buffer.empty()) {
+          std::map<uint64_t, my_timers_t>::iterator my_median = median_buffer.begin();
+          std::advance(my_median, median_buffer.size() / 2);
+
+          std::cout << "\nmediana";
+          for (int tt = 0; tt < UCXTL_SIZE; ++tt) {
+              std::cout << ':' << my_median->second.timers[tt] / 1000.0;
+        }
+          std::cout << "\n";
+        median_buffer.clear();
+        }
+      } else {
+          my_timers_t &layer_timers = median_buffer[ucx_timer[UCXTL_UCX]];
+          for (int tt = 0; tt < UCXTL_SIZE; ++tt) {
+             layer_timers.timers[tt] = ucx_timer[tt];
+          }
+      }
+      for (int tt = 0; tt < UCXTL_SIZE; ++tt) {
+          std::cout << ':' << std::right << std::setw(10) << ucx_timer[tt] / 1000.0;
+          ucx_timer[tt] = 0;
+      }
+      std::cout << ':' << ucx_counter++ << "\n" << std::flush;
+
     }
 
    private:
